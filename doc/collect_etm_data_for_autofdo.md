@@ -19,8 +19,10 @@ to enhance self-hosted ETM data collection. This new hardware is not bound to th
 interface and can be used more widely to collect AutoFDO profiles.
 
 For Pixel devices, ETM data collection is supported on EVT and DVT devices starting with Pixel 4.
-For other devices, you can try the commands in this document to see if ETM data recording is
-possible. To enable ETM data collection on a device, refer to the documentation in
+Since Pixel 10 uses ETE and TRBE (which are not bound to the external debug interface), ETM data
+collection is supported on production devices as well starting with Pixel 10. For other devices,
+you can try the commands in this document to see if ETM data recording is possible. To enable ETM
+data collection on a device, refer to the documentation in
 [Enable ETM data collection](#enable-etm-data-collection).
 
 ## Examples
@@ -405,58 +407,9 @@ $ cat perf_inject_zram.data
 // [zram]
 ```
 
-The stock `create_llvm_prof` tool from the AutoFDO repository requires a patch to correctly process
-relocatable kernel modules (which lack program headers).
--  Download AutoFDO source code at https://github.com/google/autofdo.git.
-- Apply the following patch:
-
-```diff
-diff --git a/addr2line.cc b/addr2line.cc
-index f8fe964..0951a3d 100644
---- a/addr2line.cc
-+++ b/addr2line.cc
-@@ -87,8 +87,17 @@ void LLVMAddr2line::GetInlineStack(uint64_t address, SourceStack *stack) const {
-   llvm::SmallVector<llvm::DWARFDie, 4> InlinedChain;
-   cu_iter->second->getInlinedChainForAddress(address, InlinedChain);
-
--  uint32_t row_index = line_table->lookupAddress(
--      {address, llvm::object::SectionedAddress::UndefSection});
-+  uint64_t section_index = llvm::object::SectionedAddress::UndefSection;
-+  for (const auto& sec : getObject()->sections()) {
-+    if (!sec.isText() || sec.isVirtual())
-+      continue;
-+    if (address >= sec.getAddress()
-+        && address < sec.getAddress() + sec.getSize()) {
-+      section_index = sec.getIndex();
-+      break;
-+    }
-+  }
-+  uint32_t row_index = line_table->lookupAddress({address, section_index});
-   uint32_t file = (row_index == -1U ? -1U : line_table->Rows[row_index].File);
-   uint32_t line = (row_index == -1U ? 0 : line_table->Rows[row_index].Line);
-   uint32_t discriminator =
-diff --git a/symbol_map.cc b/symbol_map.cc
-index 2483835..b744f58 100644
---- a/symbol_map.cc
-+++ b/symbol_map.cc
-@@ -478,6 +478,14 @@ void SymbolMap::ReadLoadableExecSegmentInfo(bool is_kernel) {
-                 << " vaddr=" << info.vaddr;
-     }
-   }
-+
-+  if (si_vec.empty()) {
-+    // It may be a kernel module. Create a fake segment for .text section.
-+    ElfReader::SectionInfo info;
-+    if (elf_reader.GetSectionInfoByName(".text", &info) != nullptr) {
-+      add_loadable_exec_segment(info.offset, info.addr);
-+    }
-+  }
- }
-
- void SymbolMap::BuildSymbolMap() {
-```
-
-Then we can build and run `create_llvm_prof`.
+Next, build `create_llvm_prof` from the [AutoFDO repository](https://github.com/google/autofdo.git)
+(ensure your checkout includes commit `c6b8685` or later for relocatable `.ko` support) and run it
+to convert the AutoFDO input file into an LLVM profile:
 
 ```sh
 # Run `create_llvm_prof` on host to convert AutoFDO input file to AutoFDO profile.
@@ -464,7 +417,7 @@ $ create_llvm_prof -profile perf_inject_zram.data -profiler text \
                -binary unstripped/zram.ko \
                -out zram.afdo -format extbinary
 
-# Run `llvm_profdata` and verify profile.
+# Run `llvm-profdata` and verify profile.
 $ llvm-profdata show --sample --hot-func-list zram.afdo >zram_hot_functions.txt
 ...
 6 out of 14 functions with profile (42.86%) are considered hot functions (max sample >= 157184).
@@ -491,7 +444,7 @@ ddk_module(
     ...
     debug_info_for_profiling = True,  # Add this line to add debug info for profiling.
     autofdo_profile = "zram.afdo",  # Add this line to apply AutoFDO profile.
-}
+)
 ```
 
 ## Convert ETM data for llvm-bolt (experiment)
@@ -501,7 +454,7 @@ The binaries should have an unstripped symbol table, and linked with relocations
 -q linker flag).
 
 ```sh
-# symdir is the directory containting etm_test_loop with unstripped symbol table and relocations.
+# symdir is the directory containing etm_test_loop with unstripped symbol table and relocations.
 (host) $ simpleperf inject -i perf.data --output bolt -o perf_inject_bolt.data --symdir symdir
 # Remove the comment line.
 (host) $ sed -i '/^\/\//d' perf_inject_bolt.data
@@ -517,8 +470,10 @@ The binaries should have an unstripped symbol table, and linked with relocations
 
 ## Collect ETM data with a daemon
 
-Android also has a daemon collecting ETM data periodically. It only runs on userdebug and eng
-devices. The source code is in https://android.googlesource.com/platform/system/extras/+/main/profcollectd/.
+Android also has a daemon (`profcollectd`) collecting ETM data periodically. On devices with ETE
+and TRBE, it can collect userspace traces on `user` builds as well as `userdebug` and `eng` builds
+(while ETR and kernel profiling are restricted to `userdebug` and `eng` builds). The source code is
+in https://android.googlesource.com/platform/system/extras/+/main/profcollectd/.
 
 ## Options for collecting ETM data
 
@@ -538,7 +493,7 @@ option. In practice, this reduces storage size by 75%.
 
 Another way to reduce storage size is to decode ETM data before storing it, using the `--decode-etm`
 option. This can achieve around a 98% reduction in storage size. However, it doubles CPU cycles and
-and power for recording, and can lead to data loss if processing doesn't keep up with the data
+power for recording, and can lead to data loss if processing doesn't keep up with the data
 generation rate. For this reason, profcollectd currently uses `-z` for compression instead of
 `--decode-etm`.
 
@@ -549,7 +504,7 @@ present. Then, you need to enable ETM in both the bootloader and the kernel.
 
 ### Check hardware support
 
-In ARMv8, instruction tracing relies on two Coresight components:
+On ARMv8, instruction tracing relies on two Coresight components:
 
 **Coresight ETM**: Generates the ETM data, recording the instruction stream.
 
@@ -567,6 +522,8 @@ Pixel 7: Uses Coresight ETM and Coresight ETR (ARMv8).
 Pixel 8: Uses ETE and Coresight ETR (ARMv9). While the Pixel 8 has TRBE, known errata with TRBE on
          its Cortex cores makes it unsuitable for use.
 
+Pixel 10: Uses ETE and TRBE (ARMv9).
+
 Finding Device Support Information:
 
 **ETE and TRBE support**: Refer to the relevant core's technical reference manual (e.g.,
@@ -579,11 +536,13 @@ Finding Device Support Information:
 
 ### Enable ETM in the bootloader
 
+#### Enabling CoreSight ETM and ETR (MMIO Debug Authentication)
+
 To enable Coresight ETM and Coresight ETR on ARMv8 devices (or only Coresight ETR on ARMv9 devices),
-you need to allow non-secure, non-invasive debug access on the CPU. The specific method for doing
-this varies depending on the SoC. After enabling ETM in the bootloader and kernel, you can verify
-that Coresight ETM and ETR are operational by checking their respective `TRCAUTHSTATUS` registers.
-Following is an example of Pixel 6 with ETM enabled:
+you need to allow non-secure, non-invasive debug access on the CPU (`DBGEN` and `NIDEN`). The
+specific method for doing this varies depending on the SoC. After enabling ETM in the bootloader and
+kernel, you can verify that Coresight ETM and ETR are operational by checking their respective
+`TRCAUTHSTATUS` registers. Following is an example of Pixel 6 with ETM enabled:
 
 ```sh
 oriole:/ # cat /sys/bus/coresight/devices/etm0/mgmt/trcauthstatus
@@ -592,22 +551,66 @@ oriole:/ # cat /sys/bus/coresight/devices/tmc_etr0/mgmt/authstatus
 0x33
 ```
 
-To enable ETE on ARMv9 devices, you need to allow the kernel to access trace system registers. This
-is done by setting the `ENABLE_SYS_REG_TRACE_FOR_NS` build option in Trusted Firmware-A (see
-[documentation](https://trustedfirmware-a.readthedocs.io/en/v2.11/getting_started/build-options.html)).
+#### Enabling ETE and TRBE on ARMv9 (EL3 Firmware / Trusted Firmware-A)
 
-To enable TRBE on ARMv9 devices, you need to allow the kernel to access trace buffer control
-registers. This is done by setting the `ENABLE_TRBE_FOR_NS` build option in Trusted Firmware-A (see
-[documentation](https://trustedfirmware-a.readthedocs.io/en/v2.11/getting_started/build-options.html)).
+On ARMv9 devices, ETE and TRBE are programmed via CPU system registers rather than memory-mapped
+debug interfaces. By default, EL3 firmware traps non-secure (EL2/EL1) access to both trace system
+registers (`TRC*`) and trace buffer control registers (`TRB*`). You must configure EL3 firmware to
+grant non-secure access:
 
+1. **Trusted Firmware-A (TF-A) Build Options**:
+   In upstream TF-A, both `ENABLE_SYS_REG_TRACE_FOR_NS` and `ENABLE_TRBE_FOR_NS` default to `0`
+   (see the [TF-A Build Options documentation][tf-a-docs]). When building TF-A (`bl31`), enable the
+   corresponding build options:
+   - **ETE**: Set `ENABLE_SYS_REG_TRACE_FOR_NS=1` to allow non-secure access to trace system
+     registers.
+   - **TRBE**: Set `ENABLE_TRBE_FOR_NS=1` to allow non-secure access to trace buffer control
+     registers.
+
+[tf-a-docs]: https://trustedfirmware-a.readthedocs.io/en/v2.11/getting_started/build-options.html
+
+2. **Verifying Non-Secure Access from the Kernel**:
+   Once the kernel and CoreSight modules are loaded, verify that EL3 has granted non-secure access:
+   - **ETE verification**: Confirm that `/sys/bus/event_source/devices/cs_etm/cpu*` symlinks to
+     `ete*` devices exist for all CPUs. If non-secure trace register access is not enabled in EL3,
+     the kernel ETE driver probe will fail or trigger an EL3 trap.
+   - **TRBE verification**: Confirm that TRBE sinks are registered under
+     `/sys/bus/event_source/devices/cs_etm/sinks/trbe*` (or `/sys/bus/coresight/devices/trbe*`).
+     If non-secure TRBE access is not enabled in EL3, `coresight-trbe` driver initialization will
+     fail in `dmesg` (`dmesg | grep -iE "coresight|etm4x|trbe"`).
 
 ### Enable ETM in the kernel
 
-Android kernels from version 6.x onwards generally include the necessary patches for ETM data
-collection. To enable ETM in the kernel, you need to build the required kernel modules and add the
-appropriate device tree entries.
+Android kernels from version 6.x onwards include the necessary drivers for ETM/ETE and ETR/TRBE data
+collection. To enable ETM in the kernel, configure the required kernel modules (depending on your
+kernel version) and add the appropriate device tree entries.
 
-Enable the following kernel configuration options to include the ETM kernel modules:
+#### Android 6.18+ GKI Kernels (`android17-6.18` December 2026 release and later)
+
+Starting with the December 2026 release of the `android17-6.18` GKI kernel (`arm64`), the following
+CoreSight kernel configuration options are enabled in GKI by default and shipped as signed,
+protected GKI modules in `system_dlkm`:
+
+- `CONFIG_CORESIGHT=m` -> `coresight.ko`
+- `CONFIG_CORESIGHT_SOURCE_ETM4X=m` (selects `CONFIG_CORESIGHT_LINKS_AND_SINKS=m`) ->
+  `coresight-etm4x.ko`, `coresight-funnel.ko`, `coresight-replicator.ko`
+- `CONFIG_CORESIGHT_TRBE=m` -> `coresight-trbe.ko`
+
+Depending on your device's trace sink hardware:
+
+- **ARMv9 devices using ETE and TRBE**: All required CoreSight kernel modules are already provided
+  in `system_dlkm`. Do **not** build or package duplicate copies of these modules in `vendor_dlkm`,
+  as doing so causes duplicate module collisions.
+- **Devices using CoreSight ETR**: Only `coresight-tmc.ko` (`CONFIG_CORESIGHT_LINK_AND_SINK_TMC=m`)
+  needs to be built as a vendor module in `vendor_dlkm` against the exported GKI CoreSight symbol
+  list.
+
+#### Earlier Kernels (6.1 – 6.12, or `android17-6.18` before December 2026 release)
+
+On `6.1`–`6.12` kernels (or `android17-6.18` releases prior to December 2026, before the modules
+were added to GKI), enable the following kernel configuration options to build the CoreSight drivers
+as vendor modules:
+
 ```config
 	CONFIG_CORESIGHT=m
 	CONFIG_CORESIGHT_LINK_AND_SINK_TMC=m
@@ -615,7 +618,8 @@ Enable the following kernel configuration options to include the ETM kernel modu
 	CONFIG_CORESIGHT_TRBE=m
 ```
 
-These options will build the following kernel modules:
+These options will build the following 6 kernel modules:
+
 ```
 coresight.ko
 coresight-etm4x.ko
@@ -625,12 +629,14 @@ coresight-tmc.ko
 coresight-trbe.ko
 ```
 
+#### Device Tree Configuration
+
 Different SoCs have varying Coresight device connections, address assignments, and interrupt
 configurations. Therefore, providing a universal device tree example is not feasible. However, the
 following examples from Pixel devices illustrate how device tree entries for ETM components might
 look.
 
-**Example 1: Coresight ETM and Coresight ETR (Pixel 6)**
+##### Example 1: Coresight ETM and Coresight ETR (Pixel 6)
 
 This example shows the device tree entries for Coresight ETM and ETR on Pixel 6
 (source: [gs101-debug.dtsi](https://android.googlesource.com/kernel/devices/google/gs101/+/refs/heads/android-gs-tangorpro-6.1-android16-dp/dts/gs101-debug.dtsi#287)).
@@ -644,7 +650,6 @@ etm0: etm@25840000 {
     coresight-name = "coresight-etm0";
     clocks = <&clock ATCLK>;
     clock-names = "apb_pclk";
-    arm,coresight-loses-context-with-cpu;
     out-ports {
         port {
             etm0_out_port: endpoint {
@@ -672,8 +677,9 @@ etr: etr@2500a000 {
         };
     };
 };
+```
 
-**Example 2: ETE and Coresight ETR (Pixel 8)**
+##### Example 2: ETE and Coresight ETR (Pixel 8)
 
 This example shows the device tree entries for ETE and Coresight ETR on Pixel 8
 (source: [zuma-debug.dtsi](https://android.googlesource.com/kernel/devices/google/zuma/+/refs/heads/android-gs-shusky-6.1-android16-dp/dts/zuma-debug.dtsi#428)).
@@ -682,7 +688,6 @@ This example shows the device tree entries for ETE and Coresight ETR on Pixel 8
 ete0 {
     compatible = "arm,embedded-trace-extension";
     cpu = <&cpu0>;
-    arm,coresight-loses-context-with-cpu;
     out-ports {
         port {
             ete0_out_port: endpoint {
@@ -712,7 +717,16 @@ etr: etr@2a00a000 {
 };
 ```
 
-**Example 3: TRBE
+An optional flag in the ETR device tree is `arm,scatter-gather`. Simpleperf requires 4MB of
+contiguous system memory for the ETR to store ETM data (unless an IOMMU is present). If the kernel
+cannot provide this contiguous memory, simpleperf will report an out-of-memory error.  Using the
+`arm,scatter-gather` flag allows the ETR to operate in scatter-gather mode, enabling it to utilize
+non-contiguous memory.
+
+Note: The `arm,coresight-loses-context-with-cpu` flag in the ETM/ETE device tree is no longer
+needed, as `simpleperf` temporarily disables CPU idle states during system-wide recording.
+
+##### Example 3: TRBE
 
 This example shows a basic device tree entry for TRBE.
 
@@ -722,24 +736,6 @@ trbe {
     interrupts = <GIC_PPI 0 IRQ_TYPE_LEVEL_HIGH 0>;
 };
 ```
-
-One optional flag in the ETM/ETE device tree is `arm,coresight-loses-context-with-cpu`. This flag
-ensures that ETM registers are saved when a CPU enters a low-power state. It is necessary if the
-CPU powers down the ETM/ETE during low-power states. Without this flag, the kernel cannot properly
-resume ETM data collection after the CPU wakes up, and you will likely see a
-`coresight_disclaim_device_unlocked` warning during system-wide data collection.
-
-Another optional flag in the ETR device tree is `arm,scatter-gather`. Simpleperf requires 4MB of
-contiguous system memory for the ETR to store ETM data (unless an IOMMU is present). If the kernel
-cannot provide this contiguous memory, simpleperf will report an out-of-memory error.  Using the
-`arm,scatter-gather` flag allows the ETR to operate in scatter-gather mode, enabling it to utilize
-non-contiguous memory.
-
-Each CPU has an ETM device with a unique trace_id assigned by the kernel. The standard formula for
-determining the trace_id is: `trace_id = 0x10 + cpu * 2` (as defined in
-[coresight-pmu.h](https://github.com/torvalds/linux/blob/master/include/linux/coresight-pmu.h#L22)).
-If your kernel uses a different formula due to local patches, the simpleperf inject command may
-fail to parse the ETM data correctly, potentially resulting in empty output.
 
 
 ### Check ETM enable status in /sys
@@ -767,9 +763,32 @@ lrwxrwxrwx 1 root root    0 2024-12-03 17:37 cpu5 -> ../platform/ete5/ete5
 lrwxrwxrwx 1 root root    0 2024-12-03 17:37 cpu6 -> ../platform/ete6/ete6
 lrwxrwxrwx 1 root root    0 2024-12-03 17:37 cpu7 -> ../platform/ete7/ete7
 
+# Check if the ETE/ETM sysfs files have the sysfs_devices_cs_etm SELinux label
+# (required for profcollectd and non-root simpleperf).
+comet:/sys/bus/event_source/devices/cs_etm $ ls -Z cpu0/trcidr/trcidr0
+u:object_r:sysfs_devices_cs_etm:s0 cpu0/trcidr/trcidr0
+
 # Check if we have Coresight ETR/TRBE to move ETM data to system memory.
 comet:/sys/bus/event_source/devices/cs_etm/sinks $ ls
 tmc_etf0  tmc_etr0
+```
+
+For `profcollectd` and non-root `simpleperf` (such as app profiling on `user` builds) to read
+ETM/ETE capability registers, the target directories and files in `/sys/devices/platform/` (which
+`/sys/bus/event_source/devices/cs_etm/cpu*` and `/sys/bus/coresight/devices/ete*` symlink to) must
+have the `u:object_r:sysfs_devices_cs_etm:s0` SELinux label (note that the symlinks themselves will
+still show `u:object_r:sysfs:s0`, so check a target file such as `ls -Z cpu0/trcidr/trcidr0`). If
+`ls -Z cpu0/trcidr/trcidr0` shows `u:object_r:sysfs:s0` instead, label each CPU's ETM/ETE target
+directory in your vendor `genfs_contexts` (matching the `/devices/platform/...` target path shown
+by `ls -l`):
+
+```te
+# Example from Pixel 11 (where cpu0..6 point to
+# ../platform/bus@10000000/bus@10000000:ete0..6/ete0..6):
+genfscon sysfs /devices/platform/bus@10000000/bus@10000000:ete0 u:object_r:sysfs_devices_cs_etm:s0
+genfscon sysfs /devices/platform/bus@10000000/bus@10000000:ete1 u:object_r:sysfs_devices_cs_etm:s0
+...
+genfscon sysfs /devices/platform/bus@10000000/bus@10000000:ete6 u:object_r:sysfs_devices_cs_etm:s0
 ```
 
 
