@@ -36,15 +36,15 @@ class TestExampleKotlin(TestExampleBase):
         self.run_app_profiler(start_activity=True, build_binary_cache=False)
         self.run_cmd(["report.py", "-g", "-o", "report.txt"])
         self.check_strings_in_file("report.txt", [
-            "simpleperf.example.kotlin.MainActivity$createBusyThread$1." +
-            "run", "__start_thread"])
+            "simpleperf.example.kotlin.MainActivity$createBusyCoroutine$1." +
+            "invokeSuspend", "__start_thread"])
 
     def test_report(self):
         self.common_test_report()
         self.run_cmd(["report.py", "-g", "-o", "report.txt"])
         self.check_strings_in_file("report.txt", [
-            "simpleperf.example.kotlin.MainActivity$createBusyThread$1." +
-            "run", "__start_thread"])
+            "simpleperf.example.kotlin.MainActivity$createBusyCoroutine$1." +
+            "invokeSuspend", "__start_thread"])
 
     def test_annotate(self):
         if not self.use_compiled_java_code:
@@ -61,26 +61,26 @@ class TestExampleKotlin(TestExampleBase):
 
     def test_report_sample(self):
         self.common_test_report_sample([
-            "simpleperf.example.kotlin.MainActivity$createBusyThread$1." +
-            "run", "__start_thread"])
+            "simpleperf.example.kotlin.MainActivity$createBusyCoroutine$1." +
+            "invokeSuspend", "__start_thread"])
 
     def test_pprof_proto_generator(self):
         check_strings_with_lines = []
         if self.use_compiled_java_code:
             check_strings_with_lines = [
                 "simpleperf/example/kotlin/MainActivity.kt",
-                "run"]
+                "invokeSuspend"]
         self.common_test_pprof_proto_generator(
             check_strings_with_lines=check_strings_with_lines,
             check_strings_without_lines=[
-                'simpleperf.example.kotlin.MainActivity$createBusyThread$1.run'])
+                'simpleperf.example.kotlin.MainActivity$createBusyCoroutine$1.invokeSuspend'])
 
     def test_inferno(self):
         self.common_test_inferno()
         self.run_app_profiler()
         self.run_cmd([INFERNO_SCRIPT, "-sc"])
         self.check_inferno_report_html([
-            ('simpleperf.example.kotlin.MainActivity$createBusyThread$1.run', 80)])
+            ('simpleperf.example.kotlin.MainActivity$createBusyCoroutine$1.invokeSuspend', 80)])
 
     def test_report_html(self):
         self.common_test_report_html()
@@ -123,11 +123,11 @@ class TestExampleKotlinTraceOffCpu(TestExampleBase):
     def test_smoke(self):
         self.run_app_profiler(record_arg="-g -f 1000 --duration 10 -e cpu-clock:u --trace-offcpu")
         self.run_cmd(["report.py", "-g", "-o", "report.txt"])
-        function_prefix = 'simpleperf.example.kotlin.SleepActivity$createRunSleepThread$1.'
+        function_prefix = 'simpleperf.example.kotlin.SleepActivity$createRunSleepCoroutine$1.'
         self.check_strings_in_file("report.txt", [
-            function_prefix + "run",
-            function_prefix + "RunFunction",
-            function_prefix + "SleepFunction"
+            function_prefix + "invokeSuspend",
+            function_prefix + "invokeSuspend$runFunction",
+            function_prefix + "invokeSuspend$sleepFunction"
         ])
         if self.use_compiled_java_code:
             remove("annotated_files")
@@ -138,13 +138,13 @@ class TestExampleKotlinTraceOffCpu(TestExampleBase):
             self.check_annotation_summary(summary_file, [
                 ("SleepActivity.kt", 80, 20),
                 ("run", 80, 0),
-                ("RunFunction", 20, 20),
-                ("SleepFunction", 20, 0),
+                ("runFunction", 20, 20),
+                ("sleepFunction", 20, 0),
                 ("line 23", 20, 0),
                 ("line 31", 20, 0)])
 
         self.run_cmd([INFERNO_SCRIPT, "-sc"])
         self.check_inferno_report_html([
-            (function_prefix + 'run', 80),
-            (function_prefix + 'RunFunction', 20),
-            (function_prefix + 'SleepFunction', 20)])
+            (function_prefix + 'invokeSuspend', 80),
+            (function_prefix + 'invokeSuspend$runFunction', 20),
+            (function_prefix + 'invokeSuspend$sleepFunction', 20)])

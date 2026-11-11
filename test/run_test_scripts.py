@@ -31,7 +31,7 @@ def main():
                     use_browser=False, ndk_path=None, device_serial_number="", progress_conn=None)
     build_testdata(Path(TestHelper.testdata_dir))
 
-    test_modules = [
+    test_targets = [
         # "test.api_profiler_test",
         # We can run the annotate test because it needs Texttable module.
         # "test.annotate_test",
@@ -62,13 +62,13 @@ def main():
         # "test.sample_filter_test",
         # "test.stackcollapse_test",
         ##
-        # "test.tools_test",
+        # Full tools_test needs demo/ sources; run the Bionic symbol version check on host.
+        "test.tools_test.TestTools.test_android_simpleperf_libc_symbol_versions",
     ]
 
     suite = unittest.TestSuite()
-    for module_name in test_modules:
-        module = __import__(module_name, fromlist=[""])
-        suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(module))
+    for target in test_targets:
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromName(target))
 
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     sys.exit(not result.wasSuccessful())

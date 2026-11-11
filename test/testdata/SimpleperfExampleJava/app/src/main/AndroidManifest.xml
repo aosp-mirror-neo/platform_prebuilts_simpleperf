@@ -30,7 +30,7 @@
             android:exported="true"/>
         <service
             android:name=".MultiProcessService"
-            android:process=":multiprocess_service"/>
+            android:process=":isolated_service" />
     </application>
 
 </manifest>

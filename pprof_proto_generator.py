@@ -249,17 +249,19 @@ class Mapping(object):
 
 class Function(object):
 
-    def __init__(self, name_id, dso_name_id, vaddr_in_dso):
+    def __init__(
+        self, name_id, dso_name_id, vaddr_in_dso, source_filename_id=0
+    ):
         self.id = -1  # unset
         self.name_id = name_id
         self.dso_name_id = dso_name_id
         self.vaddr_in_dso = vaddr_in_dso
-        self.source_filename_id = 0
+        self.source_filename_id = source_filename_id
         self.start_line = 0
 
     @property
     def key(self):
-        return (self.name_id, self.dso_name_id)
+        return (self.name_id, self.dso_name_id, self.source_filename_id)
 
 
 def format_meta_key(key: str) -> str:
@@ -557,10 +559,17 @@ class PprofProfileGenerator(object):
     def get_mapping(self, mapping_id):
         return self.mapping_list[mapping_id - 1] if mapping_id > 0 else None
 
-    def get_function_id(self, name, dso_name, vaddr_in_file):
+    def get_function_id(
+        self, name, dso_name, vaddr_in_file, source_filename=''
+    ):
         if name == 'unknown':
             return 0
-        function = Function(self.get_string_id(name), self.get_string_id(dso_name), vaddr_in_file)
+        function = Function(
+            self.get_string_id(name),
+            self.get_string_id(dso_name),
+            vaddr_in_file,
+            self.get_string_id(source_filename),
+        )
         exist_function = self.function_map.get(function.key)
         if exist_function:
             return exist_function.id
@@ -608,7 +617,19 @@ class PprofProfileGenerator(object):
         # 3. Generate source lines.
         addr2line.convert_addrs_to_lines(jobs)
 
-        # 4. Annotate locations and functions.
+        # 4. Annotate functions and locations.
+        for function in self.function_list:
+            dso_name = self.get_string(function.dso_name_id)
+            if function.vaddr_in_dso:
+                dso = addr2line.get_dso(dso_name)
+                if not dso:
+                    continue
+                sources = addr2line.get_addr_source(dso, function.vaddr_in_dso)
+                if sources:
+                    source_file, source_line, _ = sources[-1]
+                    self._resolve_function_source(function, source_file)
+                    function.start_line = source_line
+
         for location in self.location_list:
             if not location.lines:
                 continue
@@ -629,29 +650,37 @@ class PprofProfileGenerator(object):
                 if i == len(sources) - 1:
                     # Don't override original function name from report library, which is more
                     # accurate when proguard mapping file is given.
-                    function_id = orig_function_id
+                    orig_function = self.get_function(orig_function_id)
+                    function_id = self._resolve_function_source(orig_function, source_file)
                 else:
-                    function_id = self.get_function_id(function_name, dso_name, 0)
+                    function_id = self.get_function_id(
+                        function_name, dso_name, 0, source_file
+                    )
                 if function_id == 0:
                     continue
-                location.lines.append(self.add_line(source_file, source_line, function_id))
+                location.lines.append(self.add_line(source_line, function_id))
 
-        for function in self.function_list:
-            dso_name = self.get_string(function.dso_name_id)
-            if function.vaddr_in_dso:
-                dso = addr2line.get_dso(dso_name)
-                if not dso:
-                    continue
-                sources = addr2line.get_addr_source(dso, function.vaddr_in_dso)
-                if sources:
-                    source_file, source_line, _ = sources[0]
-                    function.source_filename_id = self.get_string_id(source_file)
-                    function.start_line = source_line
+    def _resolve_function_source(self, function: Function, source_file: str) -> int:
+        source_file_id = self.get_string_id(source_file)
+        exist_function = self.function_map.get(
+            (function.name_id, function.dso_name_id, source_file_id)
+        )
+        if exist_function:
+            return exist_function.id
+        if function.source_filename_id == 0:
+            self.function_map.pop(function.key, None)
+            function.source_filename_id = source_file_id
+            self.function_map[function.key] = function
+            return function.id
+        return self.get_function_id(
+            self.get_string(function.name_id),
+            self.get_string(function.dso_name_id),
+            0,
+            source_file,
+        )
 
-    def add_line(self, source_file, source_line, function_id):
+    def add_line(self, source_line, function_id):
         line = Line()
-        function = self.get_function(function_id)
-        function.source_filename_id = self.get_string_id(source_file)
         line.function_id = function_id
         line.line = source_line
         return line

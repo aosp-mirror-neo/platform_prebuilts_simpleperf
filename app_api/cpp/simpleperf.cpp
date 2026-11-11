@@ -16,15 +16,15 @@
 
 #include "simpleperf.h"
 
-#include <limits.h>
-#include <stdarg.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
+#include <climits>
+#include <cstdarg>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 
 #include <android/log.h>
 #include <mutex>
@@ -101,13 +101,15 @@ RecordOptions& RecordOptions::TraceOffCpu() {
 
 static std::string GetDefaultOutputFilename() {
   time_t t = time(nullptr);
-  struct tm tm;
+  struct tm tm{};
   if (localtime_r(&t, &tm) != &tm) {
     return "perf.data";
   }
   char* buf = nullptr;
-  asprintf(&buf, "perf-%02d-%02d-%02d-%02d-%02d.data", tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
-           tm.tm_min, tm.tm_sec);
+  if (asprintf(&buf, "perf-%02d-%02d-%02d-%02d-%02d.data", tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+               tm.tm_min, tm.tm_sec) == -1) {
+    return "perf.data";
+  }
   std::string result = buf;
   free(buf);
   return result;
@@ -136,12 +138,12 @@ std::vector<std::string> RecordOptions::ToRecordArgs() const {
     args.insert(args.end(), {"-t", os.str()});
   }
   if (impl_->dwarf_callgraph) {
-    args.push_back("-g");
+    args.emplace_back("-g");
   } else if (impl_->fp_callgraph) {
     args.insert(args.end(), {"--call-graph", "fp"});
   }
   if (impl_->trace_offcpu) {
-    args.push_back("--trace-offcpu");
+    args.emplace_back("--trace-offcpu");
   }
   return args;
 }
@@ -165,14 +167,14 @@ class ProfileSessionImpl {
   void StopRecording();
 
  private:
-  std::string FindSimpleperf();
-  void CheckIfPerfEnabled();
-  std::string GetProperty(const std::string& name);
+  static std::string FindSimpleperf();
+  static void CheckIfPerfEnabled();
+  static std::string GetProperty(const std::string& name);
   void CreateSimpleperfDataDir();
   void CreateSimpleperfProcess(const std::string& simpleperf_path,
                                const std::vector<std::string>& record_args);
   void SendCmd(const std::string& cmd);
-  std::string ReadReply();
+  [[nodiscard]] std::string ReadReply() const;
 
   enum State {
     NOT_YET_STARTED,
@@ -192,6 +194,9 @@ class ProfileSessionImpl {
 };
 
 ProfileSessionImpl::~ProfileSessionImpl() {
+  if (state_ == STARTED || state_ == PAUSED) {
+    StopRecording();  // Safely kill and reap the child process
+  }
   if (control_fd_ != -1) {
     close(control_fd_);
   }
@@ -270,7 +275,7 @@ void ProfileSessionImpl::SendCmd(const std::string& cmd) {
 }
 
 static bool IsExecutableFile(const std::string& path) {
-  struct stat st;
+  struct stat st{};
   if (stat(path.c_str(), &st) == 0) {
     if (S_ISREG(st.st_mode) && (st.st_mode & S_IXUSR)) {
       return true;
@@ -286,8 +291,8 @@ static std::string ReadFile(FILE* fp) {
   }
   char buf[200];
   while (true) {
-    ssize_t n = fread(buf, 1, sizeof(buf), fp);
-    if (n <= 0) {
+    size_t n = fread(buf, 1, sizeof(buf), fp);
+    if (n == 0) {
       break;
     }
     s.insert(s.end(), buf, buf + n);
@@ -296,18 +301,24 @@ static std::string ReadFile(FILE* fp) {
   return s;
 }
 
-static bool RunCmd(std::vector<const char*> args, std::string* stdout) {
+static bool RunCmd(std::vector<const char*> args, std::string* stdout_str) {
   int stdout_fd[2];
   if (pipe(stdout_fd) != 0) {
     return false;
   }
   args.push_back(nullptr);
+
   // Fork handlers (like gsl_library_close) may hang in a multi-thread environment.
   // So we use vfork instead of fork to avoid calling them.
   int pid = vfork();
+
   if (pid == -1) {
+    // FIX LEAK 1: Close both pipe ends if vfork fails
+    close(stdout_fd[0]);
+    close(stdout_fd[1]);
     return false;
   }
+
   if (pid == 0) {
     // child process
     close(stdout_fd[0]);
@@ -316,27 +327,43 @@ static bool RunCmd(std::vector<const char*> args, std::string* stdout) {
     execvp(const_cast<char*>(args[0]), const_cast<char**>(args.data()));
     _exit(1);
   }
+
   // parent process
+
+  // 1. Immediately close the write end in the parent
   close(stdout_fd[1]);
+
+  // 2. FIX DEADLOCK & LEAK 2: Read and close the read end BEFORE calling waitpid().
+  FILE* fp = fdopen(stdout_fd[0], "r");
+  if (fp == nullptr) {
+    close(stdout_fd[0]);
+  } else {
+    std::string output = ReadFile(fp);
+    if (stdout_str != nullptr) {
+      *stdout_str = std::move(output);
+    }
+  }
+
+  // 3. Now that the pipe is drained and closed, wait for the child.
   int status;
   pid_t result = TEMP_FAILURE_RETRY(waitpid(pid, &status, 0));
   if (result == -1) {
     Abort("failed to call waitpid: %s", strerror(errno));
   }
+
+  // 4. Check exit status.
+  // Because the FD was closed in step 2, we can safely return false here
+  // without needing any extra cleanup code!
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
     return false;
   }
-  if (stdout == nullptr) {
-    close(stdout_fd[0]);
-  } else {
-    *stdout = ReadFile(fdopen(stdout_fd[0], "r"));
-  }
+
   return true;
 }
 
 std::string ProfileSessionImpl::FindSimpleperf() {
   // Try /system/bin/simpleperf, which is available on Android >= Q.
-  simpleperf_path = "/system/bin/simpleperf";
+  std::string simpleperf_path = "/system/bin/simpleperf";
   if (IsExecutableFile(simpleperf_path)) {
     return simpleperf_path;
   }
@@ -369,7 +396,7 @@ std::string ProfileSessionImpl::GetProperty(const std::string& name) {
 }
 
 void ProfileSessionImpl::CreateSimpleperfDataDir() {
-  struct stat st;
+  struct stat st{};
   if (stat(simpleperf_data_dir_.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
     return;
   }
@@ -381,7 +408,7 @@ void ProfileSessionImpl::CreateSimpleperfDataDir() {
 
 void ProfileSessionImpl::CreateSimpleperfProcess(const std::string& simpleperf_path,
                                                  const std::vector<std::string>& record_args) {
-  // 1. Create control/reply pips.
+  // 1. Create control/reply pipes.
   int control_fd[2];
   int reply_fd[2];
   if (pipe(control_fd) != 0 || pipe(reply_fd) != 0) {
@@ -398,31 +425,35 @@ void ProfileSessionImpl::CreateSimpleperfProcess(const std::string& simpleperf_p
   args.emplace_back("--in-app");
   args.insert(args.end(), {"--tracepoint-events", "/data/local/tmp/tracepoint_events"});
   args.insert(args.end(), record_args.begin(), record_args.end());
-  char* argv[args.size() + 1];
-  for (size_t i = 0; i < args.size(); ++i) {
-    argv[i] = &args[i][0];
+
+  // Use std::vector for argv to avoid Variable-Length Array (VLA) compiler warnings
+  std::vector<char*> argv;
+  argv.reserve(args.size() + 1);
+  for (auto& arg : args) {
+    argv.push_back(&arg[0]);
   }
-  argv[args.size()] = nullptr;
+  argv.push_back(nullptr);
 
   // 3. Start simpleperf process.
-  // Fork handlers (like gsl_library_close) may hang in a multi-thread environment.
-  // So we use vfork instead of fork to avoid calling them.
   int pid = vfork();
   if (pid == -1) {
     Abort("failed to fork: %s", strerror(errno));
   }
+
   if (pid == 0) {
     // child process
-    close(control_fd[1]);
-    dup2(control_fd[0], 0);  // simpleperf read control cmd from fd 0.
-    close(control_fd[0]);
-    close(reply_fd[0]);
-    dup2(reply_fd[1], 1);  // simpleperf writes reply to fd 1.
-    close(reply_fd[0]);
+    close(control_fd[1]);  // Close unused write end
+    dup2(control_fd[0], 0);
+    close(control_fd[0]);  // Close original read end
+
+    close(reply_fd[0]);  // Close unused read end
+    dup2(reply_fd[1], 1);
+    close(reply_fd[1]);
     chdir(simpleperf_data_dir_.c_str());
-    execvp(argv[0], argv);
-    Abort("failed to call exec: %s", strerror(errno));
+    execvp(argv[0], argv.data());
+    _exit(1);
   }
+
   // parent process
   close(control_fd[0]);
   control_fd_ = control_fd[1];
@@ -437,7 +468,7 @@ void ProfileSessionImpl::CreateSimpleperfProcess(const std::string& simpleperf_p
   }
 }
 
-std::string ProfileSessionImpl::ReadReply() {
+std::string ProfileSessionImpl::ReadReply() const {
   std::string s;
   while (true) {
     char c;
@@ -463,9 +494,9 @@ ProfileSession::ProfileSession() {
     }
   }
   std::string app_data_dir = "/data/data/" + s;
-  int uid = getuid();
+  uid_t uid = getuid();
   if (uid >= AID_USER_OFFSET) {
-    int user_id = uid / AID_USER_OFFSET;
+    uid_t user_id = uid / AID_USER_OFFSET;
     app_data_dir = "/data/user/" + std::to_string(user_id) + "/" + s;
   }
   impl_ = new ProfileSessionImpl(app_data_dir);

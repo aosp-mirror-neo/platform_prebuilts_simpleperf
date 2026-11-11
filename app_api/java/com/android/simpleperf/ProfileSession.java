@@ -20,9 +20,7 @@ import android.os.Build;
 import android.system.Os;
 import android.system.OsConstants;
 
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
-import android.support.annotation.RequiresApi;
+import androidx.annotation.NonNull;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -32,6 +30,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -61,7 +60,6 @@ import java.util.stream.Collectors;
  * process, filter logcat with `simpleperf`.
  * </p>
  */
-@RequiresApi(28)
 public class ProfileSession {
     private static final String SIMPLEPERF_PATH_IN_IMAGE = "/system/bin/simpleperf";
 
@@ -140,9 +138,10 @@ public class ProfileSession {
             throw new IllegalStateException("startRecording: session in wrong state " + mState);
         }
         for (String arg : args) {
-            if (arg.equals("--trace-offcpu")) {
-                mTraceOffCpu = true;
-            }
+          if (arg.equals("--trace-offcpu")) {
+            mTraceOffCpu = true;
+            break;
+          }
         }
         mSimpleperfPath = findSimpleperf();
         checkIfPerfEnabled();
@@ -199,7 +198,7 @@ public class ProfileSession {
             if (exitCode != 0) {
                 throw new AssertionError("simpleperf exited with error: " + exitCode);
             }
-        } catch (InterruptedException e) {
+        } catch (InterruptedException ignored) {
         }
         mSimpleperfProcess = null;
         mState = State.STOPPED;
@@ -226,7 +225,7 @@ public class ProfileSession {
         String result = reader.lines().collect(Collectors.joining("\n"));
         try {
             reader.close();
-        } catch (IOException e) {
+        } catch (IOException ignored) {
         }
         return result;
     }
@@ -254,11 +253,11 @@ public class ProfileSession {
                     if (expirationTime > System.currentTimeMillis() / 1000) {
                         return;
                     }
-                } catch (NumberFormatException e) {
+                } catch (NumberFormatException ignored) {
                 }
             }
         }
-        if (getProperty("security.perf_harden") == "1") {
+        if (Objects.equals(getProperty("security.perf_harden"), "1")) {
             throw new Error("Recording app isn't enabled on the device."
                     + " Please run api_profiler.py.");
         }
@@ -275,7 +274,7 @@ public class ProfileSession {
         }
         try {
             process.waitFor();
-        } catch (InterruptedException e) {
+        } catch (InterruptedException ignored) {
         }
         return readInputStream(process.getInputStream());
     }
@@ -333,18 +332,18 @@ public class ProfileSession {
     private String readReply() {
         // Read one byte at a time to stop at line break or EOF. BufferedReader will try
         // to read more than available and make us blocking, so don't use it.
-        String s = "";
+        StringBuilder s = new StringBuilder();
         while (true) {
             int c = -1;
             try {
                 c = mSimpleperfProcess.getInputStream().read();
-            } catch (IOException e) {
+            } catch (IOException ignored) {
             }
             if (c == -1 || c == '\n') {
                 break;
             }
-            s += (char) c;
+            s.append((char) c);
         }
-        return s;
+        return s.toString();
     }
 }

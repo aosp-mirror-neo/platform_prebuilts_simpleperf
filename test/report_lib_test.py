@@ -17,6 +17,7 @@
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import tempfile
 from typing import Dict, List, Optional, Set
@@ -30,6 +31,7 @@ from simpleperf_report_lib import (
     SampleStruct,
     SymbolStruct,
 )
+import etm_types as etm
 from simpleperf_utils import get_host_binary_path, ReadElf
 from test.test_utils import TestBase, TestHelper, run_unit_tests
 
@@ -76,6 +78,30 @@ class TestReportLib(TestBase):
                 callchain = self.report_lib.GetCallChainOfCurrentSample()
                 self.assertEqual(callchain.nr, 0)
         self.assertTrue(found_sample)
+
+    def test_sample_addr(self):
+        # Construct a minimal perf.data with PERF_SAMPLE_ADDR (0x8) set in sample_type.
+        # sample_type = IP(1) | TID(2) | TIME(4) | ADDR(8) | CPU(128) | PERIOD(256)
+        sample_type = 1 | 2 | 4 | 8 | 128 | 256
+        header = struct.pack('<8sQQQQQQQQ32s', b'PERFILE2', 104, 136, 104, 136, 240, 56, 0, 0,
+                             b'\x00' * 32)
+        attr = struct.pack('<IIQQQQ80sQQ', 0, 120, 0, 1, sample_type, 0, b'\x00' * 80, 0, 0)
+        sample_rec = struct.pack('<IHHQIIQQIIQ', 9, 2, 56, 0x400500, 1234, 5678, 1000000,
+                                 0x7fff12345678, 3, 0, 10000)
+        record_file = Path(self.test_dir) / 'perf_with_addr.data'
+        record_file.write_bytes(header + attr + sample_rec)
+
+        self.report_lib.SetRecordFile(str(record_file))
+        sample = self.report_lib.GetNextSample()
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.ip, 0x400500)
+        self.assertEqual(sample.pid, 1234)
+        self.assertEqual(sample.tid, 5678)
+        self.assertEqual(sample.time, 1000000)
+        self.assertEqual(sample.addr, 0x7fff12345678)
+        self.assertEqual(sample.cpu, 3)
+        self.assertEqual(sample.period, 10000)
+        self.assertIsNone(self.report_lib.GetNextSample())
 
     def test_meta_info(self):
         self.report_lib.SetRecordFile(TestHelper.testdata_path('perf_with_trace_offcpu_v2.data'))
@@ -457,6 +483,96 @@ class TestReportLib(TestBase):
                               (4284, 112, 'Function2()'),
                               (4396, 28, 'main')]))
         self.assertEqual(self.report_lib.GetSymbols("/nonexistent_file.so"), None)
+
+    def test_etm_timestamp_conversion(self):
+        """This test checks if timestamp conversion is working between perf timestamps and ETM
+        timestamps. For this, the following assembly program was used:
+
+          .text
+          .global _start
+
+          _start:
+                  // loop some
+                  mov x0, #10000
+          first_loop:
+                  sub x0, x0, #1
+                  cbnz x0, first_loop
+                  // call getpid
+                  mov x8, #172
+                  svc #0
+                  // loop some more
+                  mov x0, #10000
+          second_loop:
+                  sub x0, x0, #1
+                  cbnz x0, second_loop
+                  // exit
+                  mov x0, #0
+                  mov x8, #93
+                  svc #0
+
+        which was compiled with
+           aarch64-linux-android35-clang simple.s -nostdlib -static -o simple
+
+        The program loops some to give time for a timestamp to arrive, calls getpid, loops some
+        more to let more timestamps arrive, and exits.
+
+        This was then recorded with events 'cs-etm:u' and 'raw_syscalls:sys_enter:k'. The idea is
+        that by tracing only userspace, we can ensure timestamp conversion is correct by checking
+        the last timestamp before getpid and the first after it, and make sure that the sys_enter
+        sample's timestamp is between the two.
+        """
+        record_file = TestHelper.testdata_path("perf_with_etm_sample_timestamps.data")
+        self.report_lib.SetRecordFile(record_file)
+
+        first_sample_timestamp = None
+        data = {
+            "timestamp_before": None,
+            "timestamp_after": None,
+            "seen_call": False,
+            "syscall_returned": False,
+        }
+        def callback(trace_id, elem):
+            if elem.elem_type == etm.ElemType.TIMESTAMP:
+                if not data["syscall_returned"]:
+                    data["timestamp_before"] = elem.timestamp
+                elif not data["timestamp_after"]:
+                    data["timestamp_after"] = elem.timestamp
+            elif elem.elem_type == etm.ElemType.EXCEPTION:
+                # Exception number 2 is "call", for system calls.
+                if elem.exception_number == 2:
+                    data["seen_call"] = True
+            elif elem.elem_type == etm.ElemType.TRACE_ON:
+                # There might be timestamps after the exception element, that indicate when the
+                # exception happened. We want the first timestamp after the syscall has returned.
+                # This will be after the next TRACE_ON element, which indicates that tracing has
+                # resumed. Since we only traced userspace, this will mean that the system call has
+                # returned.
+                if data["seen_call"]:
+                    data["syscall_returned"] = True
+
+        self.report_lib.SetETMCallback(callback)
+
+        while self.report_lib.GetNextSample():
+            if not first_sample_timestamp:
+                first_sample_timestamp = self.report_lib.GetCurrentSample().time
+
+        # Ensure everything has been filled out.
+        self.assertTrue(first_sample_timestamp)
+        self.assertIsNotNone(data["timestamp_before"])
+        self.assertIsNotNone(data["timestamp_after"])
+        self.assertTrue(data["seen_call"])
+        self.assertTrue(data["syscall_returned"])
+
+        # Check if converting the sample to ETM time is correct.
+        sample_in_etm = self.report_lib.ConvertPerfTimeToHWTime(first_sample_timestamp)
+        self.assertLess(data["timestamp_before"], sample_in_etm)
+        self.assertLess(sample_in_etm, data["timestamp_after"])
+
+        # Check the other way around.
+        before_in_perf = self.report_lib.ConvertHWTimeToPerfTime(data["timestamp_before"])
+        after_in_perf = self.report_lib.ConvertHWTimeToPerfTime(data["timestamp_after"])
+        self.assertLess(before_in_perf, first_sample_timestamp)
+        self.assertLess(first_sample_timestamp, after_in_perf)
 
 
 class TestProtoFileReportLib(TestBase):

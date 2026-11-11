@@ -42,7 +42,7 @@ class TestApiProfiler(TestBase):
         adb.check_run(['shell', 'am', 'start', '-n', package_name + '/.MainActivity'])
         # step 3: Wait until the app starts and exits.
         self.wait_for_pid(package_name, to_exit=False)
-        self.wait_for_pid(package_name, to_exit=True)
+        self.wait_for_pid(package_name, timeout=20.0, to_exit=True)
         # step 4: Collect recording data.
         remove('simpleperf_data')
         self.run_cmd(['api_profiler.py', 'collect', '-p', package_name, '-o', 'simpleperf_data'])
@@ -71,7 +71,7 @@ class TestApiProfiler(TestBase):
 
     def run_java_api_test(self, apk_name, min_android_version):
         self.run_api_test('simpleperf.demo.java_api', apk_name,
-                          ['simpleperf.demo.java_api.MainActivity', 'java.lang.Thread.run'],
+                          ['simpleperf.demo.java_api.MainActivity', 'runBusyWorker'],
                           min_android_version)
 
     def test_java_api_on_a_debuggable_app(self):

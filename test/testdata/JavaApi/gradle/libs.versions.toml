@@ -1,0 +1,31 @@
+[versions]
+agp = "9.2.1"
+annotation = "1.10.0"
+appcompat = "1.7.1"
+compose-bom = "2026.05.01"
+constraintlayout = "2.2.1"
+espresso-core = "3.7.0"
+junit = "4.13.2"
+runner = "1.7.0"
+compose-ui = "1.11.2"
+compose-material3 = "1.4.0"
+activity-compose = "1.13.0"
+kotlin = "2.4.0"
+
+[libraries]
+androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "annotation" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
+androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso-core" }
+androidx-runner = { group = "androidx.test", name = "runner", version.ref = "runner" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui", version.ref = "compose-ui" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "compose-material3" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

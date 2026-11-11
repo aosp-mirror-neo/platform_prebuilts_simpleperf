@@ -1,3 +1,34 @@
+Build 16894283 (Nov 11, 2026)
+record command:
+  Support ARM BRBE and ARM SPE branch recording.
+  Support dynamic PMU option parsing and event modifiers after trailing slash.
+  Add --record-app-uid option and TIME_CONV records.
+  Recover missing leaf caller in --call-graph fp and skip exited PIDs/TIDs with a warning.
+inject command:
+  Migrate branch list format from branch_list.proto to native_branch_profile.proto.
+  Support ETM, LBR, BRBE, and ARM SPE in NativeBranchProfile.
+  Add --per-app, --only-profileable-app, and --add-version-code options.
+  Support profgen output format and allow missing build IDs for AutoFDO conversion.
+stat command:
+  Add event-based interval support and speed up counter reads with PERF_FORMAT_GROUP.
+dump command:
+  Rename dumprecord to dump and transfer branch list dumping to dump.
+  Add --dump-binary-info and --dump-spe options.
+app_api:
+  Migrate Java API annotations to androidx.annotation and fix C++ RunCmd pipe cleanup.
+app_profiler.py:
+  Fix SELinux fd inheritance error when checking app type on unrooted Android 12-15.
+pprof_proto_generator.py:
+  Include source file in Function deduplication key for inlined C++ lambdas (for NDK issue #2262).
+report_fuchsia.py:
+  Output event counters and convert hardware timestamps to perf timestamps.
+simpleperf_report_lib.py:
+  Expose sample.addr and ConvertPerfTimeToHWTime/ConvertHWTimeToPerfTime in ReportLib.
+Document:
+  Add docs for collecting ARM SPE and BRBE data for AutoFDO and BOLT.
+  Update ETE/TRBE bootloader, vendor sepolicy, and Android 17 (6.18 GKI) guidance.
+
+
 Build 15655211 (June 16, 2026)
   Support Linux arm64 host for running simpleperf.
 app_api:

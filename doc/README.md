@@ -104,6 +104,14 @@ See [scripts_reference.md](./scripts_reference.md).
 
 See [view_the_profile.md](./view_the_profile.md).
 
+## Collect profile data for AutoFDO and BOLT
+
+- [Collect ETM data for AutoFDO](./collect_etm_data_for_autofdo.md)
+- [Collect SPE data for AutoFDO and BOLT](./collect_spe_data_for_autofdo.md)
+- [Collect BRBE data for AutoFDO and BOLT](./collect_brbe_data_for_autofdo.md)
+- [Collect LBR data for AutoFDO](./collect_lbr_data_for_autofdo.md)
+- [Collect AutoFDO profile for NDK apps](./collect_autofdo_profile_for_app.md)
+
 ## Answers to common issues
 
 ### Support on different Android versions

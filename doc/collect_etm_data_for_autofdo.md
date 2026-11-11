@@ -478,13 +478,13 @@ in https://android.googlesource.com/platform/system/extras/+/main/profcollectd/.
 ## Options for collecting ETM data
 
 Simpleperf provides several options for ETM data collection, which are listed in the
-"ETM recording options" section of the `simpleperf record -h` output. Here's an introduction to some
-of them:
+"ETM/SPE recording options" section of the `simpleperf record -h` output. Here's an introduction to
+some of them:
 
 ETM traces the instruction stream and can generate a large amount of data in a short time. The
 kernel uses a buffer to store this data.  The default buffer size is 4MB, which can be controlled
 with the `--aux-buffer-size` option. Simpleperf periodically reads data from this buffer, by default
-every 100ms. This interval can be adjusted using the `--etm-flush-interval` option. If the buffer
+every 100ms. This interval can be adjusted using the `--aux-flush-interval` option. If the buffer
 overflows, excess ETM data is lost. The default data generation rate is 40MB/s. This is true when
 using ETR, TRBE might copy data more frequently.
 
@@ -500,7 +500,11 @@ generation rate. For this reason, profcollectd currently uses `-z` for compressi
 ## Enable ETM data collection
 
 To enable ETM data collection on a device, you must first verify that the required hardware is
-present. Then, you need to enable ETM in both the bootloader and the kernel.
+present, and then complete three configuration steps:
+
+1. [Enable ETM in the bootloader](#enable-etm-in-the-bootloader)
+2. [Enable ETM in the kernel](#enable-etm-in-the-kernel)
+3. [Enable userspace access in vendor sepolicy](#enable-userspace-access-in-vendor-sepolicy)
 
 ### Check hardware support
 
@@ -738,6 +742,43 @@ trbe {
 ```
 
 
+### Enable userspace access in vendor sepolicy
+
+Platform sepolicy grants userspace (`shell`, `simpleperf`, and `profcollectd`) read access to
+`sysfs_devices_cs_etm` and labels `/sys/devices/cs_etm`. However, each
+`/sys/bus/event_source/devices/cs_etm/cpu<N>` entry is a symlink to the SoC's ETE/ETM device under
+`/sys/devices/platform/...`, which defaults to `u:object_r:sysfs:s0` and blocks non-root reads
+(testing under `adb root` bypasses this check, and `profcollectd` hides `sysfs` denials via
+`dontaudit`).
+
+1. Check the symlink targets on your device:
+
+   ```sh
+   $ adb shell ls -l /sys/bus/event_source/devices/cs_etm/cpu*
+   ... cpu0 -> ../platform/ete0/ete0
+   ```
+
+2. Label each CPU's ETE/ETM directory under `/devices/platform/...` in vendor `genfs_contexts`:
+
+   ```te
+   # Match the path shown by ls -l (e.g., /devices/platform/ete0 if under the DT root node, or
+   # /devices/platform/bus@10000000/bus@10000000:ete0 if nested under a DT bus node):
+   genfscon sysfs /devices/platform/ete0 u:object_r:sysfs_devices_cs_etm:s0
+   ...
+   genfscon sysfs /devices/platform/ete7 u:object_r:sysfs_devices_cs_etm:s0
+   ```
+
+3. Verify the label on a target file inside `cpu*` (rather than the `cpu*` symlink itself, which
+   already inherits `sysfs_devices_cs_etm` from `/sys/devices/cs_etm`) and test non-root recording:
+
+   ```sh
+   $ adb shell ls -Z /sys/bus/event_source/devices/cs_etm/cpu*/trcidr/trcidr0
+   u:object_r:sysfs_devices_cs_etm:s0 /sys/bus/event_source/devices/cs_etm/cpu0/trcidr/trcidr0
+   ...
+   $ adb unroot
+   $ adb shell simpleperf record -e cs-etm:u -o /data/local/tmp/perf.data sleep 0.1
+   ```
+
 ### Check ETM enable status in /sys
 
 The status of ETM devices is reflected in /sys. The following is an example from a Pixel 9.
@@ -773,23 +814,9 @@ comet:/sys/bus/event_source/devices/cs_etm/sinks $ ls
 tmc_etf0  tmc_etr0
 ```
 
-For `profcollectd` and non-root `simpleperf` (such as app profiling on `user` builds) to read
-ETM/ETE capability registers, the target directories and files in `/sys/devices/platform/` (which
-`/sys/bus/event_source/devices/cs_etm/cpu*` and `/sys/bus/coresight/devices/ete*` symlink to) must
-have the `u:object_r:sysfs_devices_cs_etm:s0` SELinux label (note that the symlinks themselves will
-still show `u:object_r:sysfs:s0`, so check a target file such as `ls -Z cpu0/trcidr/trcidr0`). If
-`ls -Z cpu0/trcidr/trcidr0` shows `u:object_r:sysfs:s0` instead, label each CPU's ETM/ETE target
-directory in your vendor `genfs_contexts` (matching the `/devices/platform/...` target path shown
-by `ls -l`):
-
-```te
-# Example from Pixel 11 (where cpu0..6 point to
-# ../platform/bus@10000000/bus@10000000:ete0..6/ete0..6):
-genfscon sysfs /devices/platform/bus@10000000/bus@10000000:ete0 u:object_r:sysfs_devices_cs_etm:s0
-genfscon sysfs /devices/platform/bus@10000000/bus@10000000:ete1 u:object_r:sysfs_devices_cs_etm:s0
-...
-genfscon sysfs /devices/platform/bus@10000000/bus@10000000:ete6 u:object_r:sysfs_devices_cs_etm:s0
-```
+If `ls -Z cpu0/trcidr/trcidr0` shows `u:object_r:sysfs:s0` instead of
+`u:object_r:sysfs_devices_cs_etm:s0`, follow
+[Enable userspace access in vendor sepolicy](#enable-userspace-access-in-vendor-sepolicy).
 
 
 ## Related docs

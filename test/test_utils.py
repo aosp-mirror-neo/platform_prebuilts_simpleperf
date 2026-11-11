@@ -121,6 +121,7 @@ class TestHelper:
         cls.progress_conn = progress_conn
         cls.min_android_version = 10
         cls._gui_supported = None
+        cls._is_emulator = None
 
         # Logs can come from multiple processes. So use append mode to avoid overwrite.
         if IS_ATEST:
@@ -197,6 +198,14 @@ class TestHelper:
     @classmethod
     def is_trace_offcpu_supported(cls):
         return 'trace-offcpu' in cls.get_device_features()
+
+    @classmethod
+    def is_emulator(cls) -> bool:
+        if cls._is_emulator is None:
+            # Match Build.IS_EMULATOR: ro.boot.qemu on Android >= 12, ro.kernel.qemu on < 12.
+            prop = 'ro.boot.qemu' if cls.android_version >= 12 else 'ro.kernel.qemu'
+            cls._is_emulator = cls.adb.get_property(prop) == '1'
+        return cls._is_emulator
 
     @classmethod
     def get_32bit_abi(cls):
@@ -303,6 +312,15 @@ class TestBase(unittest.TestCase):
             for p in [source_root, source_scripts_dir]:
                 if p not in path_list:
                     path_list.insert(0, str(p))
+
+        # Prepend the directory containing the scripts under test so it takes priority over
+        # ANDROID_BUILD_TOP/system/extras/simpleperf/scripts:
+        # - system/extras/simpleperf/scripts (for system/extras/simpleperf/scripts/test/)
+        # - prebuilts/simpleperf (for prebuilts/simpleperf/test/, which has no scripts/ subdir)
+        local_scripts_dir = str(Path(__file__).resolve().parents[1])
+        if local_scripts_dir in path_list:
+            path_list.remove(local_scripts_dir)
+        path_list.insert(0, local_scripts_dir)
 
         env['PYTHONPATH'] = os.pathsep.join(path_list)
 

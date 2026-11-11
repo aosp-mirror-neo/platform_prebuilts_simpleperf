@@ -17,11 +17,14 @@
 import io
 import os
 from pathlib import Path
+import subprocess
+import sys
+from typing import List, Tuple
 
 from binary_cache_builder import BinaryCacheBuilder
 from simpleperf_utils import (
     AdbHelper, Addr2Nearestline, AddrRange, BinaryFinder, Disassembly, Objdump,
-    ReadElf, SourceFileSearcher, is_windows, remove)
+    ReadElf, SourceFileSearcher, bytes_to_str, get_script_dir, is_windows, remove)
 from . test_utils import TestBase, TestHelper
 
 
@@ -454,6 +457,129 @@ ffffffc0089bbb34:      	stp	x29, x30, [sp, #-0x30]!
         # The binary should has a matched build id.
         path = binary_finder.find_binary('/' + elf_name, 'wrong_build_id')
         self.assertIsNone(path)
+
+    # Bionic symbol version tags introduced up through Android 10 (API 29), matching
+    # simpleperf_ndk's min_sdk_version: "29" (see bionic/libc/libc.map.txt).
+    # Using an explicit allowlist catches lettered tags (LIBC_R..LIBC_V), numeric
+    # tags (LIBC_36+), and platform-only tags (LIBC_PRIVATE, LIBC_PLATFORM, LIBC_DEPRECATED).
+    API_29_LIBC_VERSIONS = frozenset({'LIBC', 'LIBC_N', 'LIBC_O', 'LIBC_P', 'LIBC_Q'})
+    FORBIDDEN_PLATFORM_LIBC_VERSIONS = frozenset({
+        'LIBC_PRIVATE', 'LIBC_PLATFORM', 'LIBC_DEPRECATED',
+    })
+
+    @classmethod
+    def _find_disallowed_libc_symbols(
+            cls, dynsym_output: str, arch: str) -> Tuple[int, List[str]]:
+        """Returns (libc_undef_count, disallowed_symbols) from llvm-readelf --dyn-syms output."""
+        libc_count = 0
+        disallowed: List[str] = []
+        for line in dynsym_output.splitlines():
+            parts = line.split()
+            # Format: Num: Value Size Type Bind Vis [Other] Ndx Name [VersionIndex]
+            if len(parts) < 8 or not parts[0].endswith(':') or 'UND' not in parts[6:]:
+                continue
+            bind = parts[4]
+            und_idx = parts.index('UND', 6)
+            if und_idx + 1 >= len(parts) or bind == 'WEAK':
+                continue
+            symbol = parts[und_idx + 1]
+            if '@' not in symbol:
+                continue
+            _, _, version = symbol.partition('@')
+            version = version.lstrip('@')
+            if version != 'LIBC' and not version.startswith('LIBC_'):
+                continue
+            libc_count += 1
+            if arch == 'riscv64':
+                # In Soong (build/soong/cc/api_level.go), MinApiForArch(Riscv64) is FutureApiLevel
+                # rather than API 29, so riscv64 legitimately links newer public LIBC_* symbols
+                # (e.g. copy_file_range@LIBC_U), but must still avoid platform-private symbols.
+                if version in cls.FORBIDDEN_PLATFORM_LIBC_VERSIONS:
+                    disallowed.append(symbol)
+            elif version not in cls.API_29_LIBC_VERSIONS:
+                disallowed.append(symbol)
+        return libc_count, disallowed
+
+    def test_android_simpleperf_libc_symbol_versions(self):
+        # Verify parser catches post-Q, numeric, and platform-private non-WEAK symbols.
+        sample_output = """
+   Num:    Value          Size Type    Bind   Vis       Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   UND
+     1: 0000000000000000     0 FUNC    GLOBAL DEFAULT   UND __libc_init@LIBC
+    11: 0000000000000000     0 FUNC    GLOBAL DEFAULT   UND __fwrite_chk@LIBC_N
+    45: 0000000000000000     0 FUNC    WEAK   DEFAULT   UND android_fdsan_close_with_tag@LIBC_Q
+    46: 0000000000000000     0 FUNC    WEAK   DEFAULT   UND optional_future_sym@LIBC_S
+   192: 0000000000000000     0 FUNC    GLOBAL DEFAULT   UND process_madvise@LIBC_S
+   193: 0000000000000000     0 FUNC    GLOBAL DEFAULT   UND newer_api@LIBC_36 (4)
+   194: 0000000000000000     0 FUNC    GLOBAL DEFAULT   UND internal_api@LIBC_PRIVATE
+"""
+        count, bad_arm64 = self._find_disallowed_libc_symbols(sample_output, 'arm64')
+        self.assertEqual(count, 5)
+        self.assertEqual(
+            bad_arm64,
+            ['process_madvise@LIBC_S', 'newer_api@LIBC_36', 'internal_api@LIBC_PRIVATE'],
+        )
+        _, bad_riscv64 = self._find_disallowed_libc_symbols(sample_output, 'riscv64')
+        self.assertEqual(bad_riscv64, ['internal_api@LIBC_PRIVATE'])
+
+        android_bin_dir = Path(get_script_dir()) / 'bin' / 'android'
+        binaries: List[Path] = []
+        seen_paths = set()
+
+        def add_binary(path: Path) -> None:
+            resolved = path.resolve()
+            if resolved not in seen_paths and path.is_file():
+                seen_paths.add(resolved)
+                binaries.append(path)
+
+        if android_bin_dir.is_dir():
+            prebuilt_binaries = sorted(android_bin_dir.glob('*/simpleperf'))
+            found_archs = {p.parent.name for p in prebuilt_binaries}
+            for required_arch in ('arm', 'arm64', 'x86', 'x86_64'):
+                self.assertIn(
+                    required_arch, found_archs, f'Missing bin/android/{required_arch}/simpleperf'
+                )
+            for binary in prebuilt_binaries:
+                add_binary(binary)
+
+        candidate_dirs = [
+            Path(sys.argv[0]).resolve().parent,
+            TestHelper.test_base_dir.parent,
+            Path(get_script_dir()).resolve().parent,
+        ]
+        for candidate_dir in candidate_dirs:
+            for binary_name in ('simpleperf_ndk', 'simpleperf_ndk32'):
+                add_binary(candidate_dir / binary_name)
+
+        self.assertTrue(
+            binaries,
+            'No Android simpleperf binaries found in bin/android/*/simpleperf or '
+            'simpleperf_ndk/simpleperf_ndk32',
+        )
+
+        ndk_path = getattr(TestHelper, 'ndk_path', None)
+        readelf = ReadElf(ndk_path)
+        failures = []
+        for binary in binaries:
+            arch = readelf.get_arch(binary)
+            self.assertNotEqual(arch, 'unknown', f'Failed to detect ELF arch of {binary}')
+            output = bytes_to_str(subprocess.check_output(
+                [readelf.readelf_path, '--dyn-syms', '-W', str(binary)]))
+            libc_count, disallowed = self._find_disallowed_libc_symbols(output, arch)
+            self.assertGreater(
+                libc_count, 0, f'Failed to parse any @LIBC dynamic symbols from {binary}')
+            if disallowed:
+                label = (
+                    f'bin/android/{arch}/{binary.name}'
+                    if binary.parent.parent == android_bin_dir
+                    else f'{binary.name} ({arch})'
+                )
+                failures.append(f'{label}: {", ".join(disallowed)}')
+        if failures:
+            self.fail(
+                'Found non-WEAK undefined Bionic symbols newer than @LIBC_Q (API 29):\n  '
+                + '\n  '.join(failures)
+            )
 
 class TestDeviceTools(TestBase):
     def test_adb_stderr_logging(self):

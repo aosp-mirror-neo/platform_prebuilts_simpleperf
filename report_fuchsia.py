@@ -175,6 +175,35 @@ class TraceWriter:
                           (48, 63, name_ref)])
         self._write_bits([(0, 63, timestamp)])
 
+    def counter(self, thread: int, values: Dict[str, int],
+                name: Optional[str], category: Optional[str],
+                timestamp: int) -> None:
+        category_ref = self.encode_string(category) if category else 0
+        name_ref = self.encode_string(name) if name else 0
+
+        # Names have to be output first.
+        values_ref = {
+            self.encode_string(name) : values[name]
+            for name in values
+        }
+        self._write_bits([(0, 3, 4),
+                          (4, 15, 3 + len(values_ref) * 2),
+                          (16, 19, 1),
+                          (20, 23, len(values_ref)),
+                          (24, 31, thread),
+                          (32, 47, category_ref),
+                          (48, 63, name_ref)])
+        self._write_bits([(0, 63, timestamp)])
+
+        for name_ref in values_ref:
+            self._write_bits([(0, 3, 4),
+                              (4, 15, 2),
+                              (16, 31, name_ref),
+                              (32, 63, 0)])
+            self._write_bits([(0, 63, values_ref[name_ref])])
+
+        # "counter id", which does not seem to be used by Perfetto.
+        self._write_bits([(0, 63, 0)])
 
 @dataclass
 class Event:
@@ -400,6 +429,7 @@ class Tracer:
         self.objdump: Objdump = objdump
 
         self.processes: Dict[int, str] = {}
+        self.threads: Dict[int, int] = {}
 
         self.symbols: Dict[str, Tuple[List[Tuple[int, int, str]], List[int]]] = {}
         self.symbol_cache: Optional[Tuple[str, Tuple[int, int, str]]] = None
@@ -428,6 +458,44 @@ class Tracer:
         self.lost_decoding = False
         self.last_timestamp = None
 
+    def get_thread(self, tid: Optional[int]) -> int:
+        # It is possible that the thread_name changed and we have the old one saved here.
+        # The Fuchsia trace does not seem to have any nice ways to handle changing names,
+        # therefore we are sticking with the first name we saw.
+        if tid in self.threads:
+            return self.threads[tid]
+
+        if tid:
+            process = self.lib.GetThread(tid)
+            if process:
+                pid, tid, comm = process
+            else:
+                pid = tid
+                comm = f'Unknown process'
+        else:
+            pid = -1
+            tid = -1
+            comm = 'Unknown process'
+
+        kernel = "" if self.context.ex_level == etm.ExLevel.EL0 else " (kernel)"
+        thread_name = f'{tid} {comm}{kernel}'
+
+        if pid in self.processes:
+            process_name = self.processes[pid]
+        else:
+            if pid == tid:
+                parent_name = comm
+            else:
+                t = self.lib.GetThread(pid)
+                parent_name = t[2] if t else "Unknown process"
+            process_name = f'{pid} {parent_name}'
+            self.processes[pid] = process_name
+
+        pobj = self.w.kernel_object(1, process_name)
+        tobj = self.w.kernel_object(2, thread_name, process=pobj)
+        self.threads[tid] = self.w.thread(pobj, tobj)
+        return self.threads[tid]
+
     def process(self, trace_id: int, elem: etm.GenericTraceElement) -> None:
         if elem.elem_type == etm.ElemType.TRACE_ON or elem.elem_type == etm.ElemType.NO_SYNC:
             if self.s:
@@ -438,38 +506,7 @@ class Tracer:
         if elem.elem_type == etm.ElemType.PE_CONTEXT:
             if self.context.update(elem.context):
                 tid = self.context.tid
-                if tid:
-                    process = self.lib.GetThread(tid)
-                    if process:
-                        pid, tid, comm = process
-                    else:
-                        pid = tid
-                        comm = f'Unknown process'
-                else:
-                    pid = -1
-                    tid = -1
-                    comm = 'Unknown process'
-
-                kernel = "" if self.context.ex_level == etm.ExLevel.EL0 else " (kernel)"
-                thread_name = f'{tid} {comm or ""}{kernel}'
-
-                if pid in self.processes:
-                    process_name = self.processes[pid]
-                else:
-                    if pid == tid:
-                        parent_name = comm
-                    else:
-                        t = self.lib.GetThread(pid)
-                        parent_name = t[2] if t else "Unknown process"
-                    process_name = f'{pid} {parent_name or ""}'
-                    self.processes[pid] = process_name
-
-                pobj = self.w.kernel_object(1, process_name)
-                tobj = self.w.kernel_object(2, thread_name, process=pobj)
-                thread = self.w.thread(pobj, tobj)
-                # It is possible that the thread_name changed and we have the old one saved here.
-                # The Fuchsia trace does not seem to have any nice ways to handle changing names,
-                # therefore we are sticking with the first name we saw.
+                thread = self.get_thread(tid)
                 if tid not in self.stacks:
                     self.stacks[tid] = Stacker(self.w, thread)
 
@@ -477,10 +514,11 @@ class Tracer:
             return
 
         if elem.elem_type == etm.ElemType.TIMESTAMP:
-            if self.last_timestamp != elem.timestamp:
-                self.last_timestamp = elem.timestamp
+            timestamp = self.lib.ConvertHWTimeToPerfTime(elem.timestamp) or elem.timestamp
+            if self.last_timestamp != timestamp:
+                self.last_timestamp = timestamp
                 if self.s:
-                    self.s.timestamp(elem.timestamp)
+                    self.s.timestamp(timestamp)
 
         # For the other elements, a context should have happened before and must have set s.
         assert self.s
@@ -622,11 +660,32 @@ def main() -> None:
 
         filename = args.output[0] if args.output else f'{args.record_file[0]}.fxt'
 
+        pmu_values: Dict[int, Dict[str, int]] = {}
         with open(filename, 'wb') as f:
             callback = Tracer(lib, binary_finder, readelf, objdump, TraceWriter(f))
             lib.SetETMCallback(callback)
-            while not callback.abort and lib.GetNextSample():
-                pass
+
+            while not callback.abort and (sample := lib.GetNextSample()):
+                thread = callback.get_thread(sample.tid)
+
+                values = {}
+                counters = lib.GetEventCountersOfCurrentSample()
+                if counters.nr != 0:
+                    for i in range(counters.nr):
+                        counter = counters.event_counter[i]
+                        if counter.name.startswith('cs-etm'):
+                            continue
+
+                        values[counter.name] = counter.count
+                else:
+                    event = lib.GetEventOfCurrentSample()
+                    prev = pmu_values.setdefault(sample.tid, {}).get(event.name, 0)
+                    current = prev + sample.period
+                    pmu_values[sample.tid][event.name] = current
+                    values[event.name] = current
+
+                if values:
+                    callback.w.counter(thread, values, f"{sample.tid}:PMU:", None, sample.time)
 
             # Trace has ended, make sure every call has a corresponding return. Use the largest
             # timestamp and end everything there.

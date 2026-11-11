@@ -104,7 +104,8 @@ class SampleStruct(ct.Structure):
                 ('time', ct.c_uint64),
                 ('_in_kernel', ct.c_uint32),
                 ('cpu', ct.c_uint32),
-                ('period', ct.c_uint64)]
+                ('period', ct.c_uint64),
+                ('addr', ct.c_uint64)]
 
     @property
     def thread_comm(self) -> str:
@@ -399,6 +400,12 @@ class ReportLib(object):
         self._GetThread.argtypes = [ct.POINTER(ReportLibStructure), ct.c_int]
         self._ReadSymbolsForPath = self._lib.ReadSymbolsForPath
         self._ReadSymbolsForPath.restype = ct.POINTER(SymbolStruct)
+        self._ConvertPerfTimeToHWTime = self._lib.ConvertPerfTimeToHWTime
+        self._ConvertPerfTimeToHWTime.restype = ct.c_uint64
+        self._ConvertPerfTimeToHWTime.argtypes = [ct.POINTER(ReportLibStructure), ct.c_uint64]
+        self._ConvertHWTimeToPerfTime = self._lib.ConvertHWTimeToPerfTime
+        self._ConvertHWTimeToPerfTime.restype = ct.c_uint64
+        self._ConvertHWTimeToPerfTime.argtypes = [ct.POINTER(ReportLibStructure), ct.c_uint64]
         self._instance = self._CreateReportLibFunc()
         assert not _is_null(self._instance)
 
@@ -722,6 +729,14 @@ class ReportLib(object):
             i += 1
 
         return result
+
+    def ConvertPerfTimeToHWTime(self, timestamp: int) -> int:
+        """Convert perf timestamp to hardware timestamp (e.g. ETM timestamp)."""
+        return self._ConvertPerfTimeToHWTime(self.getInstance(), timestamp)
+
+    def ConvertHWTimeToPerfTime(self, timestamp: int) -> int:
+        """Convert hardware timestamp (e.g. ETM timestamp) to perf timestamp."""
+        return self._ConvertHWTimeToPerfTime(self.getInstance(), timestamp)
 
 
 ProtoSample = namedtuple('ProtoSample', ['ip', 'pid', 'tid',
@@ -1053,6 +1068,16 @@ class ProtoFileReportLib:
 
     def GetArch(self) -> str:
         return ''
+
+    def ConvertPerfTimeToHWTime(self, timestamp: int) -> int:
+        """Convert perf timestamp to hardware timestamp (e.g. ETM timestamp)."""
+        raise NotImplementedError(
+            'ConvertPerfTimeToHWTime is not implemented for report_sample profiles')
+
+    def ConvertHWTimeToPerfTime(self, timestamp: int) -> int:
+        """Convert hardware timestamp (e.g. ETM timestamp) to perf timestamp."""
+        raise NotImplementedError(
+            'ConvertHWTimeToPerfTime is not implemented for report_sample profiles')
 
     def MetaInfo(self) -> Dict[str, str]:
         return {}

@@ -41,6 +41,10 @@ class TestExampleBase(TestBase):
         cls.apk_path = apk_files[0]
         cls.package_name = package_name
         cls.activity_name = activity_name
+        # Uninstall any leftover package from an interrupted/timed-out test run so
+        # lingering in-app simpleperf processes and /data/data/<package_name>/simpleperf
+        # do not cause `cp: simpleperf: Text file busy` (or signature-mismatch errors).
+        cls.adb.run(["uninstall", package_name])
         args = ["install", "-r", "-t"]
         if abi:
             args += ["--abi", abi]
@@ -67,6 +71,13 @@ class TestExampleBase(TestBase):
             self.skipTest('Profiling java code needs wrap.sh on Android O (8.x)')
         if 'TraceOffCpu' in self.id() and not TestHelper.is_trace_offcpu_supported():
             self.skipTest('trace-offcpu is not supported on device')
+        if ('ProfileableApk' in self.id() and TestHelper.is_emulator() and
+                TestHelper.android_version <= 12):
+            self.skipTest(
+                'System simpleperf on Android <= 12 uses PMU cpu-cycles on profileable apps')
+        if ('TraceOffCpu' in self.id() and TestHelper.android_version <= 11 and
+                ('ExampleJava' in self.id() or 'ExampleKotlin' in self.id())):
+            self.skipTest('Interpreted DEX symbolization via ADexFile requires Android >= 12')
         # Use testcase_dir to share a common perf.data for reporting. So we don't need to
         # generate it for each test.
         if not os.path.isdir(self.testcase_dir):
@@ -213,8 +224,9 @@ class TestExampleBase(TestBase):
         self.check_exist(filename="perf.data")
         self.run_cmd([INFERNO_SCRIPT, "-p", self.package_name, "-f", "1000", "-du", "-t", "1"] +
                      append_args)
-        self.run_cmd([INFERNO_SCRIPT, "-p", self.package_name, "-e", "100000 cpu-cycles",
-                      "-t", "1"] + append_args)
+        if not TestHelper.is_emulator():
+            self.run_cmd([INFERNO_SCRIPT, "-p", self.package_name, "-e", "100000 cpu-cycles",
+                          "-t", "1"] + append_args)
         self.run_cmd([INFERNO_SCRIPT, "-sc"])
 
     def common_test_report_html(self):

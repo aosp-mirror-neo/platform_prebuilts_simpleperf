@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import os
+import re
 import unittest
 
 from simpleperf_utils import remove
@@ -33,12 +34,12 @@ class TestExampleCpp(TestExampleBase):
     def test_app_profiler_profile_from_launch(self):
         self.run_app_profiler(start_activity=True, build_binary_cache=False)
         self.run_cmd(["report.py", "-g", "-o", "report.txt"])
-        self.check_strings_in_file("report.txt", ["BusyLoopThread", "__start_thread"])
+        self.check_strings_in_file("report.txt", ["BusyThreadC++", "__start_thread"])
 
     def test_report(self):
         self.common_test_report()
         self.run_cmd(["report.py", "-g", "-o", "report.txt"])
-        self.check_strings_in_file("report.txt", ["BusyLoopThread", "__start_thread"])
+        self.check_strings_in_file("report.txt", ["BusyThreadC++", "__start_thread"])
 
     def test_annotate(self):
         self.common_test_annotate()
@@ -47,11 +48,11 @@ class TestExampleCpp(TestExampleBase):
         self.check_annotation_summary(summary_file, [
             ("native-lib.cpp", 20, 0),
             ("BusyLoopThread", 20, 0),
-            ("line 45", 20, 0)])
+            ("line 41", 20, 0)])
 
     def test_report_sample(self):
         self.common_test_report_sample(
-            ["BusyLoopThread",
+            ["BusyThreadC++",
              "__start_thread"])
 
     def test_pprof_proto_generator(self):
@@ -62,7 +63,7 @@ class TestExampleCpp(TestExampleBase):
             'filename: binary_cache']
         self.common_test_pprof_proto_generator(
             check_strings_with_lines,
-            check_strings_without_lines=["BusyLoopThread"])
+            check_strings_without_lines=["BusyThreadC++"])
 
     def test_inferno(self):
         self.common_test_inferno()
@@ -110,11 +111,11 @@ class TestExampleCppTraceOffCpu(TestExampleBase):
 
     def test_smoke(self):
         self.run_app_profiler(record_arg="-g -f 1000 --duration 10 -e cpu-clock:u --trace-offcpu")
-        self.run_cmd(["report.py", "-g", "--comms", "SleepThread", "-o", "report.txt"])
+        self.run_cmd(["report.py", "-g", "--comms", "SleepThreadC++", "-o", "report.txt"])
         self.check_strings_in_file("report.txt", [
             "SleepThread(void*)",
             "RunFunction()",
-            "SleepFunction(unsigned long long)"])
+            re.compile(r"SleepFunction\(unsigned long( long)?\)")])
         if (self.adb.get_device_arch() in ['x86', 'x86_64'] and
                 TestHelper.get_kernel_version() < (4, 19)):
             # Skip on x86 and kernel < 4.19, which doesn't have patch
@@ -124,21 +125,21 @@ class TestExampleCppTraceOffCpu(TestExampleBase):
             return
         remove("annotated_files")
         self.run_cmd(["annotate.py", "-s", self.example_path, "--comm",
-                      "SleepThread", '--summary-width', '1000'])
+                      "SleepThreadC++", '--summary-width', '1000'])
         self.check_exist(dirname="annotated_files")
         self.check_file_under_dir("annotated_files", "native-lib.cpp")
         summary_file = os.path.join("annotated_files", "summary")
         self.check_annotation_summary(summary_file, [
-            ("native-lib.cpp", 80, 20),
-            ("SleepThread", 80, 0),
-            ("RunFunction", 20, 20),
-            ("SleepFunction", 20, 0),
-            ("line 72", 20, 0),
-            ("line 82", 20, 0)])
+            ("native-lib.cpp", 90, 40),
+            ("SleepThread", 90, 0),
+            ("RunFunction", 40, 40),
+            ("SleepFunction", 40, 0),
+            ("line 89", 40, 40),
+            ("line 100", 40, 0)])
         self.run_cmd([INFERNO_SCRIPT, "-sc"])
-        self.check_inferno_report_html([('SleepThread', 80),
-                                        ('RunFunction', 20),
-                                        ('SleepFunction', 20)])
+        self.check_inferno_report_html([('SleepThread', 40),
+                                        ('RunFunction', 40),
+                                        ('SleepFunction', 40)])
 
 
 class TestExampleCppJniCall(TestExampleBase):
@@ -152,17 +153,17 @@ class TestExampleCppJniCall(TestExampleBase):
                 "Android O needs wrap.sh to use compiled java code. But cpp example doesn't use wrap.sh.")
             return
         self.run_app_profiler()
-        self.run_cmd(["report.py", "-g", "--comms", "BusyThread", "-o", "report.txt"])
+        self.run_cmd(["report.py", "-g", "--comms", "MixThread", "-o", "report.txt"])
         self.check_strings_in_file("report.txt", [
             "simpleperf.example.cpp.MixActivity$1.run",
             "Java_simpleperf_example_cpp_MixActivity_callFunction"])
         remove("annotated_files")
         self.run_cmd(["annotate.py", "-s", self.example_path, "--comm",
-                      "BusyThread", '--summary-width', '1000'])
+                      "MixThread", '--summary-width', '1000'])
         self.check_exist(dirname="annotated_files")
         self.check_file_under_dir("annotated_files", "native-lib.cpp")
         summary_file = os.path.join("annotated_files", "summary")
-        self.check_annotation_summary(summary_file, [("native-lib.cpp", 5, 0), ("line 39", 5, 0)])
+        self.check_annotation_summary(summary_file, [("native-lib.cpp", 5, 0), ("line 41", 5, 0)])
         if self.use_compiled_java_code:
             self.check_file_under_dir("annotated_files", "MixActivity.java")
             self.check_annotation_summary(summary_file, [

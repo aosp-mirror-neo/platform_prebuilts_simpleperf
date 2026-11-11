@@ -50,7 +50,7 @@ void* ProfileThreadFunc(void*) {
   log("stop recording successfully");
   profile_thread_exited = true;
   return nullptr;
-};
+}
 
 int CallFunction(int a) {
   return a + 1;
@@ -66,7 +66,7 @@ void* BusyThreadFunc(void*) {
     for (i = 0; i < 1000000; ) {
       i = CallFunction(i);
     }
-    timespec ts;
+    timespec ts{};
     ts.tv_sec = 0;
     ts.tv_nsec = 1000000;
     nanosleep(&ts, nullptr);

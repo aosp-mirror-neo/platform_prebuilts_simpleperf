@@ -320,8 +320,15 @@ class AppProfiler(ProfilerBase):
         if self.android_version < 12:
             # `simpleperf_app_runner --show-app-type` is supported on Android >=12.
             return
-        result, output = self.adb.run_and_return_output(['shell', 'simpleperf_app_runner',
-                                                         self.args.app, '--show-app-type'])
+        if self.android_version <= 15:
+            # Redirect stdio and pipe stdout through `cat` so SELinux does not deny
+            # `simpleperf_app_runner` inheriting adbd's socket/pty fds on unrooted Android 12-15.
+            cmd = (f'simpleperf_app_runner {self.args.app} --show-app-type'
+                   ' </dev/null 2>/dev/null | cat')
+            result, output = self.adb.run_and_return_output(['shell', cmd])
+        else:
+            result, output = self.adb.run_and_return_output(
+                ['shell', 'simpleperf_app_runner', self.args.app, '--show-app-type'])
         if not result:
             return None
         if 'debuggable' in output:

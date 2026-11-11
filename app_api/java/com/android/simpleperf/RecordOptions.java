@@ -18,9 +18,8 @@ package com.android.simpleperf;
 
 import android.system.Os;
 
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
-import android.support.annotation.RequiresApi;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -43,7 +42,6 @@ import java.util.List;
  * session.startRecording(options);
  * </p>
  */
-@RequiresApi(28)
 public class RecordOptions {
 
     /**
@@ -152,15 +150,15 @@ public class RecordOptions {
             args.add("-p");
             args.add(String.valueOf(Os.getpid()));
         } else {
-            String s = "";
+            StringBuilder s = new StringBuilder();
             for (int i = 0; i < mThreads.size(); i++) {
                 if (i > 0) {
-                    s += ",";
+                    s.append(",");
                 }
-                s += mThreads.get(i).toString();
+                s.append(mThreads.get(i).toString());
             }
             args.add("-t");
-            args.add(s);
+            args.add(s.toString());
         }
         if (mDwarfCallGraph) {
             args.add("-g");
@@ -192,7 +190,7 @@ public class RecordOptions {
     private double mDurationInSeconds = 0.0;
 
     @NonNull
-    private ArrayList<Integer> mThreads = new ArrayList<>();
+    private final ArrayList<Integer> mThreads = new ArrayList<>();
 
     private boolean mDwarfCallGraph = false;
 

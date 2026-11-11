@@ -159,7 +159,7 @@ def list_prebuilts() -> List[str]:
             result.append(d)
     result += glob.glob('*.py') + glob.glob('*.js')
     result.remove('update.py')
-    result += ['inferno.sh', 'inferno.bat']
+    result += ['inferno.sh', 'inferno.bat', 'requirements.txt']
     return result
 
 
@@ -211,11 +211,10 @@ def unzip_simpleperf_scripts(zip_path: str):
 
     # Move scripts.
     for sub_path in Path('scripts').iterdir():
-        if sub_path.name not in ['bin', 'pylintrc', 'update.py', 'Android.bp', 'README.md']:
+        if sub_path.name not in ['bin', 'pylintrc', 'update.py', 'Android.bp', 'README.md', 'CONTRIBUTING.md']:
             shutil.move(sub_path, '.')
     remove('scripts')
     remove('inferno/Android.bp')
-    remove('CONTRIBUTING.md')
 
     # Move proto files.
     proto_dir = Path('proto')
@@ -229,6 +228,9 @@ def unzip_simpleperf_scripts(zip_path: str):
     testdata_dir.mkdir()
     for source_dir in ['demo', 'runtest', 'testdata', 'test/script_testdata']:
         for sub_path in Path(source_dir).iterdir():
+            # Avoid colliding with demo/README.md in test/testdata/README.md.
+            if sub_path == Path('runtest/README.md'):
+                continue
             try:
                 shutil.move(sub_path, testdata_dir)
             except shutil.Error as e:

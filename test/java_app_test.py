@@ -26,6 +26,23 @@ from . app_test import TestExampleBase
 from . test_utils import TestHelper, INFERNO_SCRIPT
 
 
+import subprocess
+import re
+
+def is_pontis_running():
+    try:
+        pontis_output = subprocess.check_output(['pontis', 'status'], text=True, stderr=subprocess.DEVNULL)
+        if "Running State: running" in pontis_output:
+            ports = re.findall(r"Listen Port:\s+(\d+)", pontis_output)
+            adb_output = subprocess.check_output(['adb', 'devices'], text=True)
+            for port in ports:
+                if f"localhost:{port}" in adb_output:
+                    return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return False
+
+
 class TestExampleJava(TestExampleBase):
     @classmethod
     def setUpClass(cls):
@@ -49,7 +66,7 @@ class TestExampleJava(TestExampleBase):
                             self.package_name + '/.MultiProcessActivity'])
         # Wait until both MultiProcessActivity and MultiProcessService set up.
         self.wait_for_pid(self.package_name)
-        self.wait_for_pid(self.package_name + ':multiprocess_service')
+        self.wait_for_pid(self.package_name + ':isolated_service')
         self.run_app_profiler(start_activity=False)
         self.run_cmd(["report.py", "-o", "report.txt"])
         self.check_strings_in_file("report.txt", ["BusyService", "BusyThread"])
@@ -160,6 +177,7 @@ class TestExampleJava(TestExampleBase):
     def test_report_html(self):
         self.common_test_report_html()
 
+    @unittest.skipIf(is_pontis_running(), "Skipping test because device is connected via Pontis")
     def test_run_simpleperf_without_usb_connection(self):
         self.adb.check_run(['shell', 'am', 'start', '-n', self.package_name + '/.MainActivity'])
         self.run_cmd(['run_simpleperf_without_usb_connection.py', 'start', '-p',

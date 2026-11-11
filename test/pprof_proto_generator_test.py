@@ -24,7 +24,8 @@ from typing import List, Optional, Set
 from binary_cache_builder import BinaryCacheBuilder
 from pprof_proto_generator import load_pprof_profile, PprofProfileGenerator
 from . test_utils import TestBase, TestHelper
-from simpleperf_utils import ReportLibOptions, ToolFinder
+from simpleperf_utils import Addr2Nearestline, ReportLibOptions, ToolFinder
+from unittest.mock import patch
 
 
 class TestPprofProtoGenerator(TestBase):
@@ -288,6 +289,87 @@ class TestPprofProtoGenerator(TestBase):
                 self.assertEqual(line2, check_item.line2)
                 results[addr] = True
         self.assertEqual(len(results), len(check_items))
+
+    def test_inlined_functions_with_same_name_in_different_files(self):
+        """ Test that inlined functions with same name in different files receive separate
+            function entries, and non-inlined / inlined occurrences in the same file are deduplicated.
+        """
+        testdata_file = TestHelper.testdata_path('runtest_two_functions_arm64_perf.data')
+        binary_cache_builder = BinaryCacheBuilder(TestHelper.ndk_path, False)
+        binary_cache_builder.build_binary_cache(testdata_file, [TestHelper.testdata_dir])
+
+        config = {
+            'ndk_path': TestHelper.ndk_path,
+            'max_chain_length': 1000000,
+            'report_lib_options': ReportLibOptions(False, None, '', None, None, None, False),
+            'show_event_counters': False,
+            'binary_cache_dir': 'binary_cache',
+        }
+        generator = PprofProfileGenerator(config)
+        generator.load_record_file(testdata_file)
+
+        # Mock get_addr_source on Addr2Nearestline to return simulated inlined call stacks.
+        loc0_vaddr = generator.location_list[0].vaddr_in_dso
+        loc1_vaddr = generator.location_list[1].vaddr_in_dso if len(
+            generator.location_list) > 1 else None
+        func1 = next(
+            f for f in generator.function_list if generator.get_string(f.name_id) == 'Function1()'
+        )
+        func2 = next(
+            f for f in generator.function_list if generator.get_string(f.name_id) == 'Function2()'
+        )
+        func_vaddrs = {f.vaddr_in_dso for f in generator.function_list}
+
+        def fake_get_addr_source(dso, addr):
+            # Function1's entry vaddr resolves during the function_list pass, setting its
+            # start_line and re-keying its Function record.
+            if addr == func1.vaddr_in_dso:
+                return [('two_functions.cpp', 6, 'Function1()')]
+            # Function2's entry vaddr has no line info, so its source_filename_id remains 0
+            # until the location_list pass resolves it.
+            if addr == func2.vaddr_in_dso:
+                return None
+            if addr in func_vaddrs:
+                return None
+            if addr == loc0_vaddr:
+                return [
+                    ('unique_ptr.h', 10, 'operator()'),
+                    ('Foo.cc', 20, 'operator()'),
+                    ('two_functions.cpp', 9, 'Function1()'),
+                ]
+            if loc1_vaddr is not None and addr == loc1_vaddr:
+                return [
+                    ('vector.h', 30, 'operator()'),
+                    ('two_functions.cpp', 9, 'Function1()'),
+                    ('two_functions.cpp', 16, 'Function2()'),
+                ]
+            return [('two_functions.cpp', 1, 'dummy')]
+
+        with patch.object(Addr2Nearestline, 'get_addr_source', side_effect=fake_get_addr_source):
+            profile = generator.gen(1)
+
+        # Verify that operator() has distinct functions for unique_ptr.h, Foo.cc, and vector.h
+        operator_funcs = [
+            f for f in profile.function if profile.string_table[f.name] == 'operator()'
+        ]
+        self.assertEqual(len(operator_funcs), 3)
+        filenames = {profile.string_table[f.filename] for f in operator_funcs}
+        self.assertEqual(filenames, {'unique_ptr.h', 'Foo.cc', 'vector.h'})
+
+        # Verify that Function1() in two_functions.cpp is deduplicated into a single function entry
+        func1_entries = [
+            f for f in profile.function
+            if profile.string_table[f.name] == 'Function1()' and profile.string_table[f.filename] == 'two_functions.cpp'
+        ]
+        self.assertEqual(len(func1_entries), 1)
+        self.assertEqual(func1_entries[0].start_line, 6)
+
+        # Verify that Function2() in two_functions.cpp is deduplicated into a single function entry
+        func2_entries = [
+            f for f in profile.function
+            if profile.string_table[f.name] == 'Function2()' and profile.string_table[f.filename] == 'two_functions.cpp'
+        ]
+        self.assertEqual(len(func2_entries), 1)
 
     def test_comments(self):
         profile = self.generate_profile(None, ['perf_with_interpreter_frames.data'])
